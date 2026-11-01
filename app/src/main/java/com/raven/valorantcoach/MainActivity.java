@@ -5,6 +5,9 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.TimePickerDialog;
 import android.content.Intent;
+import android.net.Uri;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
@@ -22,6 +25,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
     private static final int BG=0xff10141d,PANEL=0xff1b202b,TEXT=0xfff2f4f8,MUTED=0xffa1aab9,RED=0xfff04b5e,GREEN=0xff40cfa4,BORDER=0xff343b4a;
@@ -39,8 +43,8 @@ public class MainActivity extends Activity {
     private void heading(LinearLayout l,String label,String sub){l.addView(text(label,25,TEXT,true));if(sub!=null){gap(l,5);l.addView(text(sub,13,MUTED,false));}gap(l,16);}
     private void show(int which){tab=which;root=column();root.setBackgroundColor(BG);setContentView(root);LinearLayout top=row();top.setPadding(d(20),d(15),d(20),d(12));TextView brand=text("✦  ASCEND COACH",17,RED,true);top.addView(brand,new LinearLayout.LayoutParams(0,-2,1));TextView settings=text("⚙",24,TEXT,false);settings.setOnClickListener(v->reminderSettings());top.addView(settings);root.addView(top);
         ScrollView sc=new ScrollView(this);sc.setFillViewport(true);content=column();content.setPadding(d(18),d(15),d(18),d(24));sc.addView(content);root.addView(sc,new LinearLayout.LayoutParams(-1,0,1));
-        if(which==0)today();else if(which==1)calendar();else progress();
-        nav=row();nav.setPadding(d(8),d(8),d(8),d(8));nav.setBackgroundColor(PANEL);String[] titles={"TODAY","CALENDAR","PROGRESS"};for(int i=0;i<3;i++){final int id=i;TextView b=text(titles[i],12,i==tab?RED:MUTED,true);b.setGravity(Gravity.CENTER);b.setPadding(0,d(12),0,d(12));b.setOnClickListener(v->show(id));nav.addView(b,new LinearLayout.LayoutParams(0,-2,1));}root.addView(nav);
+        if(which==0)today();else if(which==1)calendar();else if(which==2)progress();else matchesPage();
+        nav=row();nav.setPadding(d(8),d(8),d(8),d(8));nav.setBackgroundColor(PANEL);String[] titles={"TODAY","CALENDAR","PROGRESS","MATCHES"};for(int i=0;i<4;i++){final int id=i;TextView b=text(titles[i],12,i==tab?RED:MUTED,true);b.setGravity(Gravity.CENTER);b.setPadding(0,d(12),0,d(12));b.setOnClickListener(v->show(id));nav.addView(b,new LinearLayout.LayoutParams(0,-2,1));}root.addView(nav);
     }
     private void today(){String day=selected.toString();heading(content,selected.equals(LocalDate.now())?"Today's mission":"Training log",selected.format(DateTimeFormatter.ofPattern("EEEE, d MMMM yyyy",Locale.UK)));
         LinearLayout dateRow=row();TextView prev=text("◀  Previous",12,MUTED,true),next=text("Next  ▶",12,MUTED,true);dateRow.addView(prev,new LinearLayout.LayoutParams(0,-2,1));next.setGravity(Gravity.RIGHT);dateRow.addView(next,new LinearLayout.LayoutParams(0,-2,1));prev.setOnClickListener(v->{selected=selected.minusDays(1);show(0);});next.setOnClickListener(v->{if(selected.isBefore(LocalDate.now())){selected=selected.plusDays(1);show(0);}});content.addView(dateRow);gap(content,14);
@@ -73,11 +77,64 @@ public class MainActivity extends Activity {
         chartCard("Weekly ranked win rate (%)",wr,RED,"A week with no ranked games displays as zero. Compare alongside matches played.");chartCard("Weekly checklist completion (%)",completion,GREEN,"Completion covers all seven days, including recovery days; use the trend rather than expecting 100%.");
         ArrayList<Float> aimPoints=new ArrayList<>();for(CoachStore.Record r:last30)if(r.aim>0)aimPoints.add((float)r.aim);chartCard("Aim benchmark score (logged days)",aimPoints,0xff66aaff,"Keep the same Aim Lab/Kovaak's scenario and settings for comparable scores.");
         content.addView(text("TRAINING CONSISTENCY",13,MUTED,true));gap(content,10);int checked=0,full=0;for(int i=0;i<30;i++){int c=store.completed(now.minusDays(i).toString());checked+=c;if(c==CoachStore.TOTAL)full++;}card(content,text(checked+" / 300 checklist items completed\n"+full+" full-completion days in the last 30",16,TEXT,true));
-        content.addView(button("EXPORT TRAINING DATA (CSV)",this::exportCsv));gap(content,10);content.addView(text("Ranked and practice data are entered manually. The app does not connect to Riot's API or automatically verify match results.",12,MUTED,false));
+        content.addView(button("EXPORT TRAINING DATA (CSV)",this::exportCsv));gap(content,10);content.addView(button("RESTORE EXPORTED TRAINING CSV",this::importCsv));gap(content,10);content.addView(text("Manual logs above remain separate from imported HenrikDev matches, to avoid counting the same game twice. See MATCHES for automatically imported ranked statistics.",12,MUTED,false));
+    }
+    private void matchesPage(){
+        heading(content,"Synced ranked matches","HenrikDev • independent of manually logged training stats");
+        content.addView(button("SYNC MY COMPETITIVE MATCHES",this::syncMatches));gap(content,12);
+        content.addView(button("API KEY / ACCOUNT SETTINGS",this::matchSettings));gap(content,18);
+        LocalDate now=LocalDate.now();List<CoachStore.Match> recent=store.matches(now.minusDays(29).toString(),now.toString());
+        int wins=0,kills=0,deaths=0,assists=0,head=0,totalShots=0;
+        for(CoachStore.Match m:recent){if(m.won)wins++;kills+=m.kills;deaths+=m.deaths;assists+=m.assists;head+=m.headshots;totalShots+=m.headshots+m.bodyshots+m.legshots;}
+        LinearLayout summary=column();summary.addView(text("LAST 30 DAYS — IMPORTED MATCHES",13,MUTED,true));gap(summary,8);
+        summary.addView(text(recent.size()+" matches   •   "+wins+" wins",18,TEXT,true));gap(summary,7);
+        summary.addView(text((recent.isEmpty()?"—":String.format(Locale.UK,"%.1f%%",wins*100.0/recent.size()))+" win rate   •   "+(deaths==0?"—":String.format(Locale.UK,"%.2f",kills*1.0/deaths))+" K/D",16,GREEN,true));gap(summary,7);
+        summary.addView(text((totalShots==0?"—":String.format(Locale.UK,"%.1f%%",head*100.0/totalShots))+" headshots   •   "+assists+" assists",14,MUTED,false));card(content,summary);
+        ArrayList<Float> trends=new ArrayList<>();for(int i=27;i>=0;i-=7){LocalDate a=now.minusDays(i),b=a.plusDays(6);List<CoachStore.Match> week=store.matches(a.toString(),b.toString());int w=0;for(CoachStore.Match m:week)if(m.won)w++;trends.add(week.isEmpty()?0f:w*100f/week.size());}
+        chartCard("Synced weekly win rate (%)",trends,RED,"Zero indicates no imported matches for that week, not necessarily a 0% win rate.");
+        content.addView(text("RECENT MATCHES",13,MUTED,true));gap(content,10);
+        for(int i=0;i<Math.min(30,recent.size());i++){CoachStore.Match m=recent.get(i);LinearLayout r=column();r.addView(text((m.won?"WIN":"LOSS")+"  ·  "+m.map+"  ·  "+m.agent,15,m.won?GREEN:RED,true));gap(r,5);r.addView(text(m.day+"  ·  "+m.kills+" / "+m.deaths+" / "+m.assists,13,MUTED,false));card(content,r);}
+        if(recent.isEmpty())card(content,text("No synced competitive matches yet. Add your replacement API key in settings, then tap Sync.",14,MUTED,false));
+        content.addView(text("Only newly imported match IDs are saved. Your daily checklists, notes and manual entries remain untouched. HenrikDev is an unofficial third-party service.",12,MUTED,false));
+    }
+    private void matchSettings(){
+        LinearLayout body=column();pad(body,20);body.addView(text("Your API key is encrypted locally using Android Keystore and is never added to GitHub or shared with the app developer.",13,MUTED,false));gap(body,12);
+        EditText api=field(body,"Replacement HenrikDev API key (leave blank to keep existing)","");api.setSingleLine(true);
+        EditText player=field(body,"Riot name",prefs.getString("riot_name","RavenYSC"));
+        EditText tag=field(body,"Riot tag (without #)",prefs.getString("riot_tag","666"));
+        EditText region=field(body,"Region (eu / na / ap / kr)",prefs.getString("riot_region","eu"));
+        new AlertDialog.Builder(this).setTitle("Match sync settings").setView(body).setNegativeButton("Cancel",null).setNeutralButton("Remove key",(di,w)->{ApiSecrets.clear(this);Toast.makeText(this,"Stored API key cleared",Toast.LENGTH_SHORT).show();}).setPositiveButton("Save",(di,w)->{
+            String name=player.getText().toString().trim(),t=tag.getText().toString().trim().replace("#",""),reg=region.getText().toString().trim().toLowerCase(Locale.ROOT);
+            if(name.isEmpty()||t.isEmpty()||!reg.matches("na|eu|ap|kr|latam|br")){Toast.makeText(this,"Check Riot ID and region",Toast.LENGTH_LONG).show();return;}
+            prefs.edit().putString("riot_name",name).putString("riot_tag",t).putString("riot_region",reg).apply();
+            String provided=api.getText().toString().trim();if(!provided.isEmpty())try{ApiSecrets.save(this,provided);Toast.makeText(this,"API key encrypted on device",Toast.LENGTH_SHORT).show();}catch(Exception ex){Toast.makeText(this,"Unable to store API key securely",Toast.LENGTH_LONG).show();}
+        }).show();
+    }
+    private void syncMatches(){
+        String key;try{key=ApiSecrets.load(this);}catch(Exception e){Toast.makeText(this,"Unable to read encrypted key — enter a new one",Toast.LENGTH_LONG).show();return;}
+        if(key.isEmpty()){matchSettings();return;}
+        String region=prefs.getString("riot_region","eu"),name=prefs.getString("riot_name","RavenYSC"),tag=prefs.getString("riot_tag","666");
+        Toast.makeText(this,"Checking competitive match history…",Toast.LENGTH_SHORT).show();
+        Executors.newSingleThreadExecutor().execute(()->{
+            try{HenrikSync.Result result=HenrikSync.sync(getApplicationContext(),key,region,name,tag);runOnUiThread(()->{Toast.makeText(this,result.note,Toast.LENGTH_LONG).show();show(3);});}
+            catch(Exception e){String msg=e.getMessage()==null?"Unknown error":e.getMessage();runOnUiThread(()->new AlertDialog.Builder(this).setTitle("Sync unsuccessful").setMessage(msg).setPositiveButton("OK",null).show());}
+        });
     }
     private void chartCard(String title,List<Float> values,int tint,String note){LinearLayout c=column();c.addView(text(title,16,TEXT,true));gap(c,8);TrendChart chart=new TrendChart(this);chart.setData(values,tint);c.addView(chart,new LinearLayout.LayoutParams(-1,d(170)));gap(c,4);c.addView(text(note,11,MUTED,false));card(content,c);}
     private void exportCsv(){StringBuilder b=new StringBuilder("day,games,wins,kills,deaths,first_deaths,aim_score,practice_minutes,agent,notes,completed_tasks\n");for(CoachStore.Record r:store.records("2000-01-01","2100-01-01")){b.append(r.day).append(',').append(r.games).append(',').append(r.wins).append(',').append(r.kills).append(',').append(r.deaths).append(',').append(r.firstDeaths).append(',').append(r.aim).append(',').append(r.minutes).append(',').append(csv(r.agent)).append(',').append(csv(r.note)).append(',').append(store.completed(r.day)).append('\n');}
        Intent send=new Intent(Intent.ACTION_SEND).setType("text/csv").putExtra(Intent.EXTRA_TEXT,b.toString());startActivity(Intent.createChooser(send,"Share or save training CSV"));}
+    private void importCsv(){Intent pick=new Intent(Intent.ACTION_OPEN_DOCUMENT);pick.setType("*/*");pick.addCategory(Intent.CATEGORY_OPENABLE);startActivityForResult(pick,77);}
+    @Override protected void onActivityResult(int request,int result,Intent data){super.onActivityResult(request,result,data);if(request!=77||result!=RESULT_OK||data==null)return;
+        int restored=0;
+        try(BufferedReader r=new BufferedReader(new InputStreamReader(getContentResolver().openInputStream(data.getData())))){
+            String header=r.readLine();if(header==null||!header.startsWith("day,games,wins,kills,deaths,first_deaths,aim_score,practice_minutes,agent,notes"))throw new IllegalStateException("Not an Ascend Coach CSV export");
+            String line;while((line=r.readLine())!=null){List<String> parts=parseCsvLine(line);if(parts.size()<10)continue;String day=parts.get(0);if(!day.matches("[0-9]{4}-[0-9]{2}-[0-9]{2}"))continue;
+                CoachStore.Record x=new CoachStore.Record();x.day=day;x.games=Integer.parseInt(parts.get(1));x.wins=Integer.parseInt(parts.get(2));x.kills=Integer.parseInt(parts.get(3));x.deaths=Integer.parseInt(parts.get(4));x.firstDeaths=Integer.parseInt(parts.get(5));x.aim=Integer.parseInt(parts.get(6));x.minutes=Integer.parseInt(parts.get(7));x.agent=parts.get(8);x.note=parts.get(9);store.save(x);restored++;
+            }
+            Toast.makeText(this,"Restored "+restored+" training records",Toast.LENGTH_LONG).show();show(tab);
+        }catch(Exception e){new AlertDialog.Builder(this).setTitle("Import failed").setMessage(e.getMessage()).setPositiveButton("OK",null).show();}
+    }
+    private List<String> parseCsvLine(String line){ArrayList<String> fields=new ArrayList<>();StringBuilder field=new StringBuilder();boolean quoted=false;for(int i=0;i<line.length();i++){char ch=line.charAt(i);if(ch=='"'){if(quoted&&i+1<line.length()&&line.charAt(i+1)=='"'){field.append('"');i++;}else quoted=!quoted;}else if(ch==','&&!quoted){fields.add(field.toString());field.setLength(0);}else field.append(ch);}fields.add(field.toString());return fields;}
     private String csv(String s){return "\""+s.replace("\"","\"\"")+"\"";}
     private void reminderSettings(){LinearLayout body=column();pad(body,20);Switch toggle=new Switch(this);toggle.setText("Enable daily reminders");toggle.setTextColor(TEXT);toggle.setChecked(prefs.getBoolean("enabled",false));body.addView(toggle);gap(body,16);TextView[] times=new TextView[3];for(int i=0;i<3;i++){final int j=i;times[i]=text(ReminderReceiver.TITLES[i]+"  ·  "+formatTime(i),15,TEXT,true);pad(times[i],12);times[i].setBackground(shape(PANEL,0));body.addView(times[i]);gap(body,8);times[i].setOnClickListener(v->{int hour=prefs.getInt("hour"+j,new int[]{10,14,19}[j]),minute=prefs.getInt("minute"+j,0);new TimePickerDialog(this,(picker,h,m)->{prefs.edit().putInt("hour"+j,h).putInt("minute"+j,m).apply();times[j].setText(ReminderReceiver.TITLES[j]+"  ·  "+formatTime(j));},hour,minute,true).show();});}
         body.addView(text("Reminders are approximate and may be delayed by Android battery optimisation. No account or internet required.",12,MUTED,false));new AlertDialog.Builder(this).setTitle("Notification settings").setView(body).setNegativeButton("Cancel",null).setPositiveButton("Save",(dialog,w)->{prefs.edit().putBoolean("enabled",toggle.isChecked()).apply();if(toggle.isChecked()&&Build.VERSION.SDK_INT>=33&&checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED)requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},44);ReminderReceiver.schedule(this);Toast.makeText(this,"Reminder preferences saved",Toast.LENGTH_SHORT).show();}).show();}
